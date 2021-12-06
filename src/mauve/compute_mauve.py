@@ -11,8 +11,6 @@ from sklearn.preprocessing import normalize
 from sklearn.decomposition import PCA
 from sklearn.metrics import auc as compute_area_under_curve
 
-from .utils import fast_featurize_tokens_from_model
-
 try:
     import torch
     FOUND_TORCH = True
@@ -40,7 +38,7 @@ def compute_mauve(
         kmeans_num_redo=5, kmeans_max_iter=500,
         featurize_model_name='gpt2-large', device_id=-1, max_text_length=1024,
         divergence_curve_discretization_size=25, mauve_scaling_factor=5,
-        verbose=False, seed=25
+        verbose=False, seed=25, batch_size=1,
 ):
 
     """
@@ -71,6 +69,7 @@ def compute_mauve(
         See `Best Practices <index.html#best-practices-for-mauve>`_ for details.
     :param ``verbose``: If True, print running time updates.
     :param ``seed``: random seed to initialize k-means cluster assignments.
+    :param ``batch_size``: Batch size for feature extraction
 
     :return: an object with fields p_hist, q_hist, divergence_curve and mauve.
 
@@ -87,11 +86,11 @@ def compute_mauve(
         raise ValueError('Supply at least one of q_features, q_tokens, q_text')
     p_features = get_features_from_input(
         p_features, p_tokens, p_text, featurize_model_name, max_text_length,
-        device_id, name="p", verbose=verbose
+        device_id, name="p", verbose=verbose, batch_size=batch_size,
     )
     q_features = get_features_from_input(
         q_features, q_tokens, q_text, featurize_model_name, max_text_length,
-        device_id, name="q", verbose=verbose
+        device_id, name="q", verbose=verbose, batch_size=batch_size,
     )
     if num_buckets == 'auto':
         # heuristic: use num_clusters = num_generations / 10
@@ -132,103 +131,8 @@ def compute_mauve(
     )
     return to_return
 
-def fast_compute_mauve(
-        p_features=None, q_features=None,
-        p_tokens=None, q_tokens=None,
-        p_text=None, q_text=None,
-        num_buckets='auto', pca_max_data=-1, kmeans_explained_var=0.9,
-        kmeans_num_redo=5, kmeans_max_iter=500,
-        featurize_model_name='gpt2-large', device_id=-1, max_text_length=1024,
-        divergence_curve_discretization_size=25, mauve_scaling_factor=5,
-        verbose=False, seed=25, batch_size=8,
-):
-    """
-    Compute the MAUVE score between two text generations P and Q.
-    P is either specified as ``p_features``, ``p_tokens``, or ``p_text``. Same with Q.
-    :param ``p_features``: ``numpy.ndarray`` of shape (n, d), where n is the number of generations.
-    :param ``q_features``: ``numpy.ndarray`` of shape (n, d), where n is the number of generations.
-    :param ``p_tokens``: list of length n, each entry is torch.LongTensor of shape (1, length).
-    :param ``q_tokens``: list of length n, each entry is torch.LongTensor of shape (1, length).
-    :param ``p_text``: list of length n, each entry is a string.
-    :param ``q_text``: list of length n, each entry is a string.
-    :param ``num_buckets``: the size of the histogram to quantize P and Q. Options: ``'auto'`` (default, which is n/10) or an integer.
-    :param ``pca_max_data``: the number data points to use for PCA. If `-1`, use all the data. Default -1.
-    :param ``kmeans_explained_var``: amount of variance of the data to keep in dimensionality reduction by PCA. Default 0.9.
-    :param ``kmeans_num_redo``: number of times to redo k-means clustering (the best objective is kept). Default 5.
-        Try reducing this to 1 in order to reduce running time.
-    :param ``kmeans_max_iter``: maximum number of k-means iterations. Default 500.
-        Try reducing this to 100 in order to reduce running time.
-    :param ``featurize_model_name``: name of the model from which features are obtained. Default 'gpt2-large'.
-        We support all models which can be loaded from ``transformers.AutoModel.from_pretrained(featurize_model_name)``.
-    :param ``device_id``: Device for featurization. Supply gpu_id (e.g. 0 or 3) to use GPU or -1 to use CPU.
-    :param ``max_text_length``: maximum number of tokens to consider. Default 1024.
-    :param ``divergence_curve_discretization_size``: Number of points to consider on the divergence curve. Default 25.
-        Larger values do not offer much of a difference.
-    :param ``mauve_scaling_factor``: The constant``c`` from the paper. Default 5.
-        See `Best Practices <index.html#best-practices-for-mauve>`_ for details.
-    :param ``verbose``: If True, print running time updates.
-    :param ``seed``: random seed to initialize k-means cluster assignments.
-    :param ``batch_size``: Batch size for feature extraction
-    :return: an object with fields p_hist, q_hist, divergence_curve and mauve.
-    * ``out.mauve`` is a number between 0 and 1, the MAUVE score. Higher values means P is closer to Q.
-    * ``out.frontier_integral``, a number between 0 and 1. Lower values mean that P is closer to Q.
-    * ``out.p_hist`` is the obtained histogram for P. Same for ``out.q_hist``.
-    * ``out.divergence_curve`` contains the points in the divergence curve. It is of shape (m, 2), where m is ``divergence_curve_discretization_size``
-    """
-
-    if p_features is None and p_tokens is None and p_text is None:
-        raise ValueError('Supply at least one of p_features, p_tokens, p_text')
-    if q_features is None and q_tokens is None and q_text is None:
-        raise ValueError('Supply at least one of q_features, q_tokens, q_text')
-    p_features = fast_get_features_from_input(
-        p_features, p_tokens, p_text, featurize_model_name, max_text_length,
-        device_id, name="p", verbose=verbose, batch_size=batch_size,
-    )
-    q_features = fast_get_features_from_input(
-        q_features, q_tokens, q_text, featurize_model_name, max_text_length,
-        device_id, name="q", verbose=verbose, batch_size=batch_size,
-    )
-    if num_buckets == 'auto':
-        # heuristic: use num_clusters = num_generations / 10
-        num_buckets = max(2, int(round(min(p_features.shape[0], q_features.shape[0]) / 10)))
-    elif not isinstance(num_buckets, int):
-        raise ValueError('num_buckets is expected to be an integer or "auto"')
-
-    # Acutal binning
-    t1 = time.time()
-    p, q = cluster_feats(p_features, q_features,
-                         num_clusters=num_buckets,
-                         norm='l2', whiten=False,
-                         pca_max_data=pca_max_data,
-                         explained_variance=kmeans_explained_var,
-                         num_redo=kmeans_num_redo,
-                         max_iter=kmeans_max_iter,
-                         seed=seed, verbose=verbose)
-    t2 = time.time()
-    if verbose:
-        print('total discretization time:', round(t2 - t1, 2), 'seconds')
-
-    # Divergence curve and mauve
-    mixture_weights = np.linspace(1e-6, 1 - 1e-6, divergence_curve_discretization_size)
-    divergence_curve = get_divergence_curve_for_multinomials(p, q, mixture_weights, mauve_scaling_factor)
-    x, y = divergence_curve.T
-    idxs1 = np.argsort(x)
-    idxs2 = np.argsort(y)
-    mauve_score = 0.5 * (
-        compute_area_under_curve(x[idxs1], y[idxs1]) +
-        compute_area_under_curve(y[idxs2], x[idxs2])
-    )
-    fi_score = get_fronter_integral(p, q)
-    to_return = SimpleNamespace(
-        p_hist=p, q_hist=q, divergence_curve=divergence_curve,
-        mauve=mauve_score,
-        frontier_integral=fi_score,
-        num_buckets=num_buckets,
-    )
-    return to_return
-
 def get_features_from_input(features, tokenized_texts, texts,
-                            featurize_model_name, max_len, device_id, name,
+                            featurize_model_name, max_len, device_id, name, batch_size,
                             verbose=False):
     global MODEL, TOKENIZER, MODEL_NAME
     if features is None:
@@ -267,55 +171,7 @@ def get_features_from_input(features, tokenized_texts, texts,
         else:
             MODEL = MODEL.to(get_device_from_arg(device_id))
         if verbose: print('Featurizing tokens')
-        features = featurize_tokens_from_model(MODEL, tokenized_texts, name).detach().cpu().numpy()
-    else:
-        features = np.asarray(features)
-    return features
-
-def fast_get_features_from_input(features, tokenized_texts, texts,
-                                 featurize_model_name, max_len, device_id, name, batch_size,
-                                 verbose=False):
-    global MODEL, TOKENIZER, MODEL_NAME
-    if features is None:
-        # Featurizing is necessary. Make sure the required packages are available
-        if not FOUND_TORCH:
-            raise ModuleNotFoundError(
-                """PyTorch not found. Please install PyTorch if you would like to use the featurization.
-                    For details, see `https://github.com/krishnap25/mauve` 
-                    and `https://pytorch.org/get-started/locally/`.
-                """)
-        if not FOUND_TRANSFORMERS:
-            raise ModuleNotFoundError(
-                """Transformers not found. Please install Transformers if you would like to use the featurization.
-                    For details, see `https://github.com/krishnap25/mauve` 
-                    and `https://huggingface.co/transformers/installation.html`.
-                """)
-
-        if tokenized_texts is None:
-            # tokenize texts
-            if TOKENIZER is None or MODEL_NAME != featurize_model_name:
-                if verbose: print('Loading tokenizer')
-                TOKENIZER = get_tokenizer(featurize_model_name)
-            if verbose: print('Tokenizing text...')
-            tokenized_texts = [
-                TOKENIZER.encode(sen, return_tensors='pt', truncation=True, max_length=max_len)
-                for sen in texts
-            ]
-        # use tokenized_texts to featurize
-        if TOKENIZER is None or MODEL_NAME != featurize_model_name:
-            if verbose: print('Loading tokenizer')
-            TOKENIZER = get_tokenizer(featurize_model_name)
-        if MODEL is None or MODEL_NAME != featurize_model_name:
-            if verbose: print('Loading model')
-            MODEL = get_model(featurize_model_name, TOKENIZER, device_id)
-            MODEL_NAME = featurize_model_name
-        else:
-            MODEL = MODEL.to(get_device_from_arg(device_id))
-        if verbose: print('Featurizing tokens')
-        features = fast_featurize_tokens_from_model(MODEL,
-                                                    tokenized_texts,
-                                                    batch_size=batch_size,
-                                                    name=name).detach().cpu().numpy()
+        features = featurize_tokens_from_model(MODEL, tokenized_texts, batch_size, name).detach().cpu().numpy()
     else:
         features = np.asarray(features)
     return features

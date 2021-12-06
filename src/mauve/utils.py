@@ -84,31 +84,7 @@ def decode_samples_from_lst(tokenizer, tokenized_texts):
     return output
 
 @torch.no_grad()
-def featurize_tokens_from_model(model, tokenized_texts, name="", verbose=False):
-    """Featurize tokenized texts using models
-
-    :param model: HF Transformers model
-    :param tokenized_texts: list of torch.LongTensor of shape (1, length)
-    :param verbose: If True, print status and time
-    :return:
-    """
-    device = next(model.parameters()).device
-    t1 = time.time()
-    feats = []
-    for sen in tqdm(tokenized_texts, desc=f"Featurizing {name}"):
-        if isinstance(sen, list):
-            sen = torch.LongTensor(sen).unsqueeze(0)
-        sen = sen.to(device)
-        outs = model(input_ids=sen, past_key_values=None,
-                     output_hidden_states=True, return_dict=True)
-        h = outs.hidden_states[-1]  # (batch_size, seq_len, dim)
-        feats.append(h[:, -1, :].cpu())
-    t2 = time.time()
-    if verbose: print(f'Featurize time: {round(t2-t1, 2)}')
-    return torch.cat(feats)
-
-@torch.no_grad()
-def fast_featurize_tokens_from_model(model, tokenized_texts, batch_size, name="", verbose=False):
+def featurize_tokens_from_model(model, tokenized_texts, batch_size, name="", verbose=False):
     """Featurize tokenized texts using models, support batchify
     :param model: HF Transformers model
     :param batch_size: Batch size used during forward pass
